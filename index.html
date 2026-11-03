@@ -3829,15 +3829,16 @@ $('#btnPlan').addEventListener('click', exportPlan);
 // ---- SketchUp: Collada (.dae), Z-up, feet; one group per block inside a group per floor, plus the site ----
 function buildDAE(r, s) {
   const showUnits = $('#vUnits').getAttribute('aria-pressed') === 'true'; const A = s.angle || 0; const typo = TYPO_COLOR[s.typology];
-  const keys = ['--u0', '--u1', '--u2', '--u3', '--u4', '--u5', '--c-core', '--c-support', '--c-corridor', '--c-ground', '--c-lobby', '--c-parking', '--c-void', '--scene-site', '--accent', '--bad', typo];
+  const keys = ['--u0', '--u1', '--u2', '--u3', '--u4', '--u5', '--c-core', '--c-support', '--c-corridor', '--c-ground', '--c-lobby', '--c-parking', '--c-aisle', '--c-void', '--scene-site', '--accent', '--bad', typo];
   const PAL = lightPalette(keys);
   const colorVar = b => {
-    if (b.use === 'parking' || b.use === 'ground' || b.use === 'lobby' || b.use === 'support') return { parking: '--c-parking', ground: '--c-ground', lobby: '--c-lobby', support: '--c-support' }[b.use];
+    if (b.use === 'parking' || b.use === 'surface') return b.pk && b.pk !== 'stall' ? '--c-aisle' : '--c-parking';
+    if (b.use === 'ground' || b.use === 'lobby' || b.use === 'support') return { ground: '--c-ground', lobby: '--c-lobby', support: '--c-support' }[b.use];
     if (!showUnits) return typo;
     if (b.use === 'unit') return unitVar(b.type);
     return { core: '--c-core', corridor: '--c-corridor', void: '--c-void' }[b.use] || typo;
   };
-  const matName = v => ({ '--c-core': 'Stairs and elevators', '--c-support': 'Trash and support', '--c-corridor': 'Corridor', '--c-ground': 'Amenity', '--c-lobby': 'Lobby', '--c-parking': 'Parking', '--c-void': 'Unassigned', '--scene-site': 'Site', '--accent': 'Street frontage', '--bad': 'Interior lot line' })[v]
+  const matName = v => ({ '--c-core': 'Stairs and elevators', '--c-support': 'Trash and support', '--c-corridor': 'Corridor', '--c-ground': 'Amenity', '--c-lobby': 'Lobby', '--c-parking': 'Parking stalls', '--c-aisle': 'Drive aisle', '--c-void': 'Unassigned', '--scene-site': 'Site', '--accent': 'Street frontage', '--bad': 'Interior lot line' })[v]
     || (v.startsWith('--u') ? 'Unit ' + ((state.project.program.types[+v.slice(3)] || {}).name || v.slice(3)) : s.typology + ' residential');
   const xml = s2 => String(s2).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const used = new Set(); const geoms = []; const nf = v => String(Math.round(v * 1000) / 1000);
@@ -3862,16 +3863,27 @@ function buildDAE(r, s) {
     const geo = new THREE.ExtrudeGeometry(sh, { depth: Math.max(0.1, z1 - z0), bevelEnabled: false, curveSegments: 1 });
     const a = Array.from(geo.attributes.position.array); for (let i = 2; i < a.length; i += 3) a[i] += z0; geo.dispose(); return a;
   };
-  // floors
-  const L = levelsOf(s); const groups = L.lv.map(() => []);
+  // floors: Level > space type > one group per space (each unit, stair, corridor piece, amenity room...)
+  const L = levelsOf(s); const groups = L.lv.map(() => ({}));
+  const CAT = { unit: 'Units', lobby: 'Lobby and leasing', ground: 'Amenity', core: 'Stairs and elevators', corridor: 'Corridors', support: 'Trash and support', parking: 'Parking', void: 'Unassigned' };
+  const CAT_ORDER = ['Units', 'Lobby and leasing', 'Amenity', 'Retail', 'Corridors', 'Stairs and elevators', 'Trash and support', 'Parking', 'Unassigned'];
+  const surfaceNodes = []; const counters = {};
+  const spaceName = (b, li) => { const lv = 'L' + String(li + 1).padStart(2, '0'); const a = fmt(blockArea(b));
+    if (b.use === 'unit') return `${lv} ${b.type || 'Unit'} - ${a} sf`;
+    if (b.use === 'core') return `${lv} ${b.elev ? 'Elevator core' : 'Stair'} - ${a} sf`;
+    if (b.use === 'ground') return `${lv} ${b.retail ? 'Retail' : 'Amenity'} - ${a} sf`;
+    if (b.use === 'parking' || b.use === 'surface') return `${lv} ${b.pk === 'stall' ? `Parking stalls (${b.stalls || 0})` : b.pk === 'aisle' ? 'Drive aisle' : b.pk === 'ramp' ? 'Drive / ramp' : 'Parking'} - ${a} sf`;
+    return `${lv} ${USE_NAME[b.use] || b.use} - ${a} sf`; };
   s.blocks.forEach(b => {
     const pl = blockPoly(b).map(p => TF.rot(p, A)), holes = (b.holes || []).map(h => h.map(p => TF.rot(p, A)));
     const tris = extrude(pl, holes, b.z0, b.z1);
     let lines = null;
     if (showUnits && b.use === 'unit' && b.parts && b.parts.length) { lines = []; b.parts.forEach(([c0, e0, ext]) => { const C = TF.rot(c0, A), E = TF.rot(e0, A); lines.push(C[0], C[1], b.z1, E[0], E[1], b.z1); if (ext !== 0) lines.push(E[0], E[1], b.z0, E[0], E[1], b.z1); }); }
     const gm = addGeom(tris, lines, colorVar(b), '--c-support'); if (!gm) return;
-    const nm = b.use === 'unit' ? `${b.type || 'Unit'} (${fmt(blockArea(b))} sf)` : (USE_NAME[b.use] || b.use);
-    groups[L.at(b.z0)].push(inst(gm, nm));
+    const li = L.at(b.z0); const k = (counters[li + b.use] = (counters[li + b.use] || 0) + 1);
+    const node = inst(gm, spaceName(b, li) + ` #${k}`);
+    if (b.use === 'surface') { surfaceNodes.push(node); return; }
+    const cat = b.use === 'ground' && b.retail ? 'Retail' : (CAT[b.use] || 'Other'); (groups[li][cat] = groups[li][cat] || []).push(node);
   });
   // site: ground face just below grade + lot lines by role
   const sp = r.site.pts; const tri = THREE.ShapeUtils.triangulateShape(sp.map(p => new THREE.Vector2(p[0], p[1])), []);
@@ -3880,10 +3892,12 @@ function buildDAE(r, s) {
   const ln = { st: [], in: [] }; sp.forEach((a, i) => { const b = sp[(i + 1) % sp.length], role = r.site.roles[i]; (role === 'front' || role === 'street' ? ln.st : ln.in).push(a[0], a[1], 0, b[0], b[1], 0); });
   if (ln.st.length) { const gm = addGeom([], ln.st, '--accent', '--accent'); if (gm) siteNodes.push(inst(gm, 'Street frontage')); }
   if (ln.in.length) { const gm = addGeom([], ln.in, '--bad', '--bad'); if (gm) siteNodes.push(inst(gm, 'Interior lot lines')); }
+  if (surfaceNodes.length) siteNodes.push(`<node name="Surface parking">${surfaceNodes.join('')}</node>`);
   const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
   const effects = [...used].map(v => { const c = PAL[v] || [150, 150, 150]; return `<effect id="fx${matId(v)}"><profile_COMMON><technique sid="common"><lambert><diffuse><color>${(c[0] / 255).toFixed(4)} ${(c[1] / 255).toFixed(4)} ${(c[2] / 255).toFixed(4)} 1</color></diffuse></lambert></technique></profile_COMMON></effect>`; }).join('');
   const mats = [...used].map(v => `<material id="${matId(v)}" name="${xml(matName(v))}"><instance_effect url="#fx${matId(v)}"/></material>`).join('');
-  const floors = L.lv.map((z, i) => groups[i].length ? `<node name="Level ${String(i + 1).padStart(2, '0')} (${fmt(z, 1)} ft)">${groups[i].join('')}</node>` : '').join('');
+  const floors = L.lv.map((z, i) => { const g = groups[i]; const cats = CAT_ORDER.concat(Object.keys(g).filter(c => !CAT_ORDER.includes(c))).filter(c => g[c] && g[c].length);
+    return cats.length ? `<node name="Level ${String(i + 1).padStart(2, '0')} (${fmt(z, 1)} ft)">${cats.map(c => `<node name="${xml(c)}">${g[c].join('')}</node>`).join('')}</node>` : ''; }).join('');
   return `<?xml version="1.0" encoding="utf-8"?>
 <COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1"><asset><contributor><authoring_tool>LJC Residential Test-Fit</authoring_tool></contributor><created>${now}</created><modified>${now}</modified><unit name="foot" meter="0.3048"/><up_axis>Z_UP</up_axis></asset>
 <library_effects>${effects}</library_effects><library_materials>${mats}</library_materials><library_geometries>${geoms.join('\n')}</library_geometries>
